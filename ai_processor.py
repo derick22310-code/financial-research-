@@ -1,3 +1,16 @@
+import json
+import logging
+import os
+import requests
+import html  # 新增：用於處理非法字元
+from typing import List, Dict
+import google.generativeai as genai
+from datetime import datetime
+import pytz
+import asyncio
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 class AIProcessor:
     def __init__(self, config_path: str = 'config.json'):
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -13,44 +26,117 @@ class AIProcessor:
         else:
              genai.configure(api_key=api_key)
              
-        # 關鍵修正：加入 system_instruction，從根本鎖定語言
-        self.model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash',
-            system_instruction="你是一位專業的金融分析師。你必須『全程』使用『繁體中文』回答，禁止使用英文撰寫摘要內容。輸出格式必須嚴格遵守 JSON。"
-        )
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
+
+    def filter_by_keywords(self, articles: List[Dict]) -> List[Dict]:
+        filtered = []
+        for article in articles:
+            title_lower = article['title'].lower()
+            if any(k in title_lower for k in self.keywords):
+                filtered.append(article)
+        return filtered
 
     def process_article(self, article: Dict) -> Dict:
-        # 簡化 Prompt，讓指令更清晰
         prompt = f"""
-        請分析以下新聞並將結果翻譯為繁體中文：
-        標題：{article['title']}
-        來源：{article['source']}
+        Analyze the following financial news.
+        Title: {article['title']}
+        Source: {article['source']}
 
-        JSON 格式要求：
+        你必須全程使用繁體中文進行摘要，否則程式會出錯。
+        1. 針對這則新聞對金融市場的重要性進行評分 (1-10分)。
+        2. 將標題翻譯成繁體中文。
+        3. 撰寫約 80 字的繁體中文摘要。
+        4. 提供原本的英文摘要 (Original Summary)。
+
+        You MUST respond ONLY with a valid JSON object strictly matching this format:
         {{
-            "score": 評分(1-10),
-            "zh_title": "繁體中文標題",
-            "zh_summary": "約 80 字的繁體中文深入摘要",
-            "en_summary": "原本的英文摘要"
+            "score": 8,
+            "zh_title": "中文標題翻譯",
+            "zh_summary": "中文摘要內容",
+            "en_summary": "English summary content"
         }}
         """
         try:
-            # 這裡不變，維持 JSON 解析邏輯
             response = self.model.generate_content(prompt)
             text = response.text.replace("```json", "").replace("```", "").strip()
             data = json.loads(text)
-            
-            # 確保抓到的是中文欄位
             article['score'] = data.get('score', 0)
-            article['zh_title'] = data.get('zh_title') or article.get('title')
-            article['zh_summary'] = data.get('zh_summary') or "翻譯失敗"
-            article['en_summary'] = data.get('en_summary') or "N/A"
-            
-            logging.info(f"Processed in Chinese: {article['zh_title']}")
+            article['zh_title'] = data.get('zh_title', article['title'])
+            article['zh_summary'] = data.get('zh_summary', 'N/A')
+            article['en_summary'] = data.get('en_summary', 'N/A')
+            logging.info(f"Processed: {article['zh_title']} (Score: {article['score']})")
         except Exception as e:
-            logging.error(f"AI Processing failed: {e}")
+            logging.error(f"Error processing article: {e}")
             article['score'] = 0
-            article['zh_title'] = article.get('title')
-            article['zh_summary'] = "自動摘要失敗"
+            article['zh_title'] = article.get('title', '')
+            article['zh_summary'] = "摘要生成失敗"
             article['en_summary'] = "N/A"
         return article
+
+def send_telegram_bulk(token: str, chat_id: str, text: str):
+    if not token or not chat_id:
+        logging.error("Missing TG credentials.")
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }
+    resp = requests.post(url, json=payload, timeout=15)
+    if resp.status_code == 200:
+        logging.info("[SUCCESS] Integrated Chinese report sent.")
+    else:
+        logging.error(f"TG send failed: {resp.text}")
+
+if __name__ == "__main__":
+    from scraper import NewsScraper
+    from storage import StorageManager
+
+    async def run_all():
+        logging.info("Starting AI Processor run...")
+        scraper = NewsScraper()
+        ai = AIProcessor()
+        storage = StorageManager()
+        
+        raw_articles = await scraper.scrape_all()
+        logging.info(f"Scraped {len(raw_articles)} raw articles.")
+        
+        filtered = ai.filter_by_keywords(raw_articles)
+        logging.info(f"Filtered down to {len(filtered)} articles.")
+        
+        processed_list = []
+        for a in filtered:
+            processed_list.append(ai.process_article(a))
+            
+        processed_list.sort(key=lambda x: x.get('score', 0), reverse=True)
+        top_5 = processed_list[:5]
+        
+        storage.save_results(processed_list)
+        
+        if top_5:
+            taipei_tz = pytz.timezone('Asia/Taipei')
+            now_str = datetime.now(taipei_tz).strftime('%Y-%m-%d %H:%M')
+            
+            msg = f"📊 <b>今日金融重點快訊 (台北時間: {now_str})</b>\n\n"
+            for item in top_5:
+                # 關鍵修正：對所有文字進行 HTML 轉義，防止特殊符號破壞解析
+                zh_t = html.escape(item.get('zh_title') or item.get('title', 'N/A'))
+                zh_s = html.escape(item.get('zh_summary', 'N/A'))
+                en_s = html.escape(item.get('en_summary', 'N/A'))
+                source = html.escape(item.get('source', 'Unknown'))
+                url = item.get('url', '#')
+                
+                msg += f"<b>【標題】：{zh_t}</b>\n"
+                msg += f"摘要：{zh_s}\n\n"
+                msg += f"Original Summary：{en_s}\n"
+                msg += f"<i>來源: {source}</i> | <a href='{url}'>閱讀原文</a>\n"
+                msg += "──────────────\n\n"
+            
+            # 關鍵修正：將發送指令移到迴圈外，確保只發送一次完整的整合訊息
+            send_telegram_bulk(ai.tg_token, ai.tg_chat_id, msg)
+        else:
+            logging.info("No articles to send. (Check keywords or scraper status)")
+
+    asyncio.run(run_all())
