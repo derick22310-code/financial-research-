@@ -43,26 +43,38 @@ class AIProcessor:
         return filtered_articles
 
     def summarize_article(self, article: Dict) -> Dict:
-        """Uses Gemini to summarize the headline/article context."""
+        """Uses Gemini to summarize the headline/article context and score importance."""
         prompt = f"""
-        Analyze the following financial news headline and provide a brief summary in Traditional Chinese (繁體中文).
+        Analyze the following financial news headline.
         Title: {article['title']}
         Source: {article['source']}
 
-        Please provide a summary containing:
-        1. 核心事件 (Core event)
-        2. 潛在市場影響 (Potential market impact)
-        3. 關鍵數據 (Key figures/numbers mentioned)
-        
-        Limit your entire response to under 100 words. Keep it highly concise.
+        1. Assess its importance to the financial market on a scale of 1 to 10.
+        2. Translate the title into Traditional Chinese (繁體中文).
+        3. Write a brief summary in Traditional Chinese (around 60 words).
+        4. Write a brief summary in English (around 60 words).
+
+        You MUST respond ONLY with a valid JSON object strictly matching this format:
+        {{
+            "score": 8,
+            "zh_title": "中文標題翻譯",
+            "zh_summary": "中文摘要內容",
+            "en_summary": "English summary content"
+        }}
         """
         
         try:
             response = self.model.generate_content(prompt)
-            article['summary'] = response.text.strip()
-            logging.info(f"Successfully summarized: {article['title'][:30]}...")
+            text = response.text.replace("```json", "").replace("```", "").strip()
+            data = json.loads(text)
+            
+            article['score'] = data.get('score', 0)
+            article['summary'] = f"<b>【標題】：{data.get('zh_title', article['title'])}</b>\n\n摘要：{data.get('zh_summary', 'N/A')}\n\nOriginal Summary：{data.get('en_summary', 'N/A')}"
+            
+            logging.info(f"Successfully summarized: {article['title'][:30]}... (Score: {article['score']})")
         except Exception as e:
             logging.error(f"Failed to summarize article '{article['title'][:30]}...': {e}")
+            article['score'] = 0
             article['summary'] = "Summary generation failed."
             
         return article
@@ -91,28 +103,40 @@ class AIProcessor:
         """Filters and summarizes the list of articles."""
         filtered = self.filter_by_keywords(articles)
         
-        # Limit to the top 5 most important news
-        filtered = filtered[:5]
-        
         processed = []
         for article in filtered:
             processed_article = self.summarize_article(article)
             processed.append(processed_article)
             
-        # Group into a single Telegram message
-        valid_articles = [a for a in processed if a.get('summary') and a['summary'] != "Summary generation failed."]
+        # Sort by importance score descending and limit to top 5
+        processed.sort(key=lambda x: x.get('score', 0), reverse=True)
+        top_5 = processed[:5]
+            
+        # Group into Telegram message(s)
+        valid_articles = [a for a in top_5 if a.get('summary') and a['summary'] != "Summary generation failed."]
         if valid_articles:
             tz_tpe = timezone(timedelta(hours=8))
             now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
             
-            msg = f"<b>今日金融重點快訊 ({now})</b>\n\n"
+            header = f"📊 <b>今日金融重點快訊 ({now})</b>\n\n"
+            messages = []
+            current_msg = header
+            
             for a in valid_articles:
-                msg += f"<b>{a['title']}</b>\n"
-                msg += f"<i>Source: {a['source']}</i>\n\n"
-                msg += f"{a['summary']}\n\n"
-                msg += f"<a href='{a.get('url', '#')}'>Read more</a>\n\n"
+                article_block = f"<i>Source: {a['source']}</i>\n\n{a['summary']}\n\n<a href='{a.get('url', '#')}'>閱讀原文 (Read more)</a>\n\n──────────────\n\n"
                 
-            self.send_telegram_message(msg)
+                # Check length limit (Telegram max is 4096 chars)
+                if len(current_msg) + len(article_block) > 4000:
+                    messages.append(current_msg)
+                    current_msg = article_block
+                else:
+                    current_msg += article_block
+                    
+            if current_msg:
+                messages.append(current_msg)
+                
+            for m in messages:
+                self.send_telegram_message(m)
 
         return processed
 
@@ -127,22 +151,36 @@ if __name__ == "__main__":
             
         logging.info(f"Loaded {len(saved_articles)} articles from data/news_20260223.json")
         
-        # Limit to top 5
-        saved_articles = saved_articles[:5]
+        # Sort by importance score descending and limit to top 5
+        saved_articles.sort(key=lambda x: x.get('score', 0), reverse=True)
+        top_5 = saved_articles[:5]
         
-        valid_articles = [a for a in saved_articles if a.get('summary') and a['summary'] != "Summary generation failed."]
+        valid_articles = [a for a in top_5 if a.get('summary') and a['summary'] != "Summary generation failed."]
         if valid_articles:
             tz_tpe = timezone(timedelta(hours=8))
             now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
             
-            msg = f"<b>今日金融重點快訊 ({now})</b>\n\n"
-            for article in valid_articles:
-                msg += f"<b>{article['title']}</b>\n"
-                msg += f"<i>Source: {article['source']}</i>\n\n"
-                msg += f"{article['summary']}\n\n"
-                msg += f"<a href='{article.get('url', '#')}'>Read more</a>\n\n"
+            header = f"📊 <b>今日金融重點快訊 ({now})</b>\n\n"
+            messages = []
+            current_msg = header
+            
+            for a in valid_articles:
+                # If reading old formatted jsons without zh_title, we gracefully just print the title.
+                title_line = "" if "【標題】" in a['summary'] else f"<b>{a['title']}</b>\n"
                 
-            processor.send_telegram_message(msg)
+                article_block = f"{title_line}<i>Source: {a['source']}</i>\n\n{a['summary']}\n\n<a href='{a.get('url', '#')}'>閱讀原文 (Read more)</a>\n\n──────────────\n\n"
+                
+                if len(current_msg) + len(article_block) > 4000:
+                    messages.append(current_msg)
+                    current_msg = article_block
+                else:
+                    current_msg += article_block
+                    
+            if current_msg:
+                messages.append(current_msg)
+                
+            for m in messages:
+                processor.send_telegram_message(m)
                 
         logging.info("Telegram message sent successfully!")
     except FileNotFoundError:
