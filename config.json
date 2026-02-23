@@ -1,0 +1,48 @@
+{
+  "keywords": [
+    "AI",
+    "Nvidia",
+    "Inflation",
+    "Fed",
+    "Interest Rates",
+    "Market",
+    "Earnings"
+  ],
+  "sources": [
+    {
+      "name": "Reuters",
+      "url": "https://www.reuters.com/business/finance/",
+      "article_selector": "div[data-testid='StoryCard']",
+      "headline_selector": "span[data-testid='Heading']",
+      "link_selector": "a[data-testid='Heading']"
+    },
+    {
+      "name": "Bloomberg",
+      "url": "https://www.bloomberg.com/markets",
+      "article_selector": "article.story-list-story",
+      "headline_selector": "h3",
+      "link_selector": "a.story-list-story__info__headline-link"
+    },
+    {
+      "name": "CNBC",
+      "url": "https://www.cnbc.com/finance/",
+      "article_selector": "div.Card-standardBreakerCard",
+      "headline_selector": "a.Card-title",
+      "link_selector": "a.Card-title"
+    },
+    {
+      "name": "Financial Times",
+      "url": "https://www.ft.com/companies/financials",
+      "article_selector": "div.o-teaser__content",
+      "headline_selector": "div.o-teaser__heading",
+      "link_selector": "div.o-teaser__heading a"
+    },
+    {
+      "name": "Wall Street Journal",
+      "url": "https://www.wsj.com/finance",
+      "article_selector": "article.WSJTheme--story--12-toT72",
+      "headline_selector": "span.WSJTheme--headlineText--He1ANr9C",
+      "link_selector": "a"
+    }
+  ]
+}
