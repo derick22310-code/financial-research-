@@ -103,3 +103,25 @@ class AIProcessor:
                 self.send_telegram_message(msg)
 
         return processed
+
+if __name__ == "__main__":
+    # Local test block to send previously saved news to Telegram
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    processor = AIProcessor()
+    
+    try:
+        with open('data/news_20260223.json', 'r', encoding='utf-8') as f:
+            saved_articles = json.load(f)
+            
+        logging.info(f"Loaded {len(saved_articles)} articles from data/news_20260223.json")
+        for article in saved_articles:
+            if article.get('summary') and article['summary'] != "Summary generation failed.":
+                msg = f"<b>{article['title']}</b>\n"
+                msg += f"<i>Source: {article['source']}</i>\n\n"
+                msg += f"{article['summary']}\n\n"
+                msg += f"<a href='{article.get('url', '#')}'>Read more</a>"
+                processor.send_telegram_message(msg)
+                
+        logging.info("Telegram message sent successfully!")
+    except FileNotFoundError:
+        logging.error("File data/news_20260223.json not found.")
