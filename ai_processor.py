@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import requests
+import html  # 新增：用於處理非法字元
 from typing import List, Dict
 import google.generativeai as genai
 from datetime import datetime
@@ -80,9 +81,10 @@ def send_telegram_bulk(token: str, chat_id: str, text: str):
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
     }
-    resp = requests.post(url, json=payload, timeout=10)
+    resp = requests.post(url, json=payload, timeout=15)
     if resp.status_code == 200:
         logging.info("[SUCCESS] Integrated Chinese report sent.")
     else:
@@ -108,32 +110,33 @@ if __name__ == "__main__":
         for a in filtered:
             processed_list.append(ai.process_article(a))
             
-        # 關鍵修正：在 if __name__ == "__main__": 區塊中，必須先將所有新聞按分數排序，僅取前 5 名。
         processed_list.sort(key=lambda x: x.get('score', 0), reverse=True)
         top_5 = processed_list[:5]
         
-        # 儲存
         storage.save_results(processed_list)
         
-        # 訊息整合：將這 5 則中文摘要結合成一條長訊息，標題要有台北時間。
         if top_5:
             taipei_tz = pytz.timezone('Asia/Taipei')
             now_str = datetime.now(taipei_tz).strftime('%Y-%m-%d %H:%M')
             
             msg = f"📊 <b>今日金融重點快訊 (台北時間: {now_str})</b>\n\n"
             for item in top_5:
-                zh_t = item.get('zh_title') or item.get('title')
-                zh_s = item.get('zh_summary', 'N/A')
-                en_s = item.get('en_summary', 'N/A')
+                # 關鍵修正：對所有文字進行 HTML 轉義，防止特殊符號破壞解析
+                zh_t = html.escape(item.get('zh_title') or item.get('title', 'N/A'))
+                zh_s = html.escape(item.get('zh_summary', 'N/A'))
+                en_s = html.escape(item.get('en_summary', 'N/A'))
+                source = html.escape(item.get('source', 'Unknown'))
+                url = item.get('url', '#')
                 
                 msg += f"<b>【標題】：{zh_t}</b>\n"
                 msg += f"摘要：{zh_s}\n\n"
                 msg += f"Original Summary：{en_s}\n"
-                msg += f"<i>來源: {item.get('source')}</i> | <a href='{item.get('url', '#')}'>閱讀原文</a>\n"
+                msg += f"<i>來源: {source}</i> | <a href='{url}'>閱讀原文</a>\n"
                 msg += "──────────────\n\n"
-                
+            
+            # 關鍵修正：將發送指令移到迴圈外，確保只發送一次完整的整合訊息
             send_telegram_bulk(ai.tg_token, ai.tg_chat_id, msg)
         else:
-            logging.info("No articles to send.")
+            logging.info("No articles to send. (Check keywords or scraper status)")
 
     asyncio.run(run_all())
