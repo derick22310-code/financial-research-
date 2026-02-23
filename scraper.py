@@ -32,7 +32,11 @@ class NewsScraper:
                 for article in articles:
                     try:
                         headline_elem = await article.query_selector(source_config['headline_selector'])
-                        link_elem = await article.query_selector(source_config['link_selector'])
+                        
+                        if source_config['link_selector'] == 'self':
+                            link_elem = article
+                        else:
+                            link_elem = await article.query_selector(source_config['link_selector'])
 
                         if headline_elem and link_elem:
                             headline = await headline_elem.text_content()

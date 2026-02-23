@@ -6,7 +6,17 @@
     "Fed",
     "Interest Rates",
     "Market",
-    "Earnings"
+    "Earnings",
+    "人工智慧",
+    "輝達",
+    "通膨",
+    "聯準會",
+    "降息",
+    "升息",
+    "利率",
+    "市場",
+    "財報",
+    "股市"
   ],
   "sources": [
     {
@@ -43,6 +53,27 @@
       "article_selector": "article.WSJTheme--story--12-toT72",
       "headline_selector": "span.WSJTheme--headlineText--He1ANr9C",
       "link_selector": "a"
+    },
+    {
+      "name": "Futu Niuniu (富途牛牛)",
+      "url": "https://news.futunn.com/hk/main",
+      "article_selector": "a.market-item.list-item",
+      "headline_selector": "h2",
+      "link_selector": "self"
+    },
+    {
+      "name": "Nikkei Chinese (日經中文網)",
+      "url": "https://zh.cn.nikkei.com/",
+      "article_selector": "dl",
+      "headline_selector": "dt a",
+      "link_selector": "dt a"
+    },
+    {
+      "name": "Investing.com HK",
+      "url": "https://hk.investing.com/news/stock-market-news",
+      "article_selector": "li[data-test='article-item']",
+      "headline_selector": "a[data-test='article-title-link']",
+      "link_selector": "a[data-test='article-title-link']"
     }
   ]
 }
