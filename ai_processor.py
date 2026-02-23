@@ -4,6 +4,7 @@ import os
 from typing import List, Dict
 import requests
 import google.generativeai as genai
+from datetime import datetime, timezone, timedelta
 
 class AIProcessor:
     def __init__(self, config_path: str = 'config.json'):
@@ -44,14 +45,14 @@ class AIProcessor:
     def summarize_article(self, article: Dict) -> Dict:
         """Uses Gemini to summarize the headline/article context."""
         prompt = f"""
-        Analyze the following financial news headline and provide a brief summary.
+        Analyze the following financial news headline and provide a brief summary in Traditional Chinese (繁體中文).
         Title: {article['title']}
         Source: {article['source']}
 
         Please provide a summary containing:
-        1. Core event
-        2. Potential market impact
-        3. Key figures/numbers mentioned (if any)
+        1. 核心事件 (Core event)
+        2. 潛在市場影響 (Potential market impact)
+        3. 關鍵數據 (Key figures/numbers mentioned)
         
         Limit your entire response to under 100 words. Keep it highly concise.
         """
@@ -89,18 +90,29 @@ class AIProcessor:
     def process(self, articles: List[Dict]) -> List[Dict]:
         """Filters and summarizes the list of articles."""
         filtered = self.filter_by_keywords(articles)
+        
+        # Limit to the top 5 most important news
+        filtered = filtered[:5]
+        
         processed = []
         for article in filtered:
             processed_article = self.summarize_article(article)
             processed.append(processed_article)
             
-            # Send to Telegram if summary is valid
-            if processed_article.get('summary') and processed_article['summary'] != "Summary generation failed.":
-                msg = f"<b>{processed_article['title']}</b>\n"
-                msg += f"<i>Source: {processed_article['source']}</i>\n\n"
-                msg += f"{processed_article['summary']}\n\n"
-                msg += f"<a href='{processed_article.get('url', '#')}'>Read more</a>"
-                self.send_telegram_message(msg)
+        # Group into a single Telegram message
+        valid_articles = [a for a in processed if a.get('summary') and a['summary'] != "Summary generation failed."]
+        if valid_articles:
+            tz_tpe = timezone(timedelta(hours=8))
+            now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
+            
+            msg = f"<b>今日金融重點快訊 ({now})</b>\n\n"
+            for a in valid_articles:
+                msg += f"<b>{a['title']}</b>\n"
+                msg += f"<i>Source: {a['source']}</i>\n\n"
+                msg += f"{a['summary']}\n\n"
+                msg += f"<a href='{a.get('url', '#')}'>Read more</a>\n\n"
+                
+            self.send_telegram_message(msg)
 
         return processed
 
@@ -114,13 +126,23 @@ if __name__ == "__main__":
             saved_articles = json.load(f)
             
         logging.info(f"Loaded {len(saved_articles)} articles from data/news_20260223.json")
-        for article in saved_articles:
-            if article.get('summary') and article['summary'] != "Summary generation failed.":
-                msg = f"<b>{article['title']}</b>\n"
+        
+        # Limit to top 5
+        saved_articles = saved_articles[:5]
+        
+        valid_articles = [a for a in saved_articles if a.get('summary') and a['summary'] != "Summary generation failed."]
+        if valid_articles:
+            tz_tpe = timezone(timedelta(hours=8))
+            now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
+            
+            msg = f"<b>今日金融重點快訊 ({now})</b>\n\n"
+            for article in valid_articles:
+                msg += f"<b>{article['title']}</b>\n"
                 msg += f"<i>Source: {article['source']}</i>\n\n"
                 msg += f"{article['summary']}\n\n"
-                msg += f"<a href='{article.get('url', '#')}'>Read more</a>"
-                processor.send_telegram_message(msg)
+                msg += f"<a href='{article.get('url', '#')}'>Read more</a>\n\n"
+                
+            processor.send_telegram_message(msg)
                 
         logging.info("Telegram message sent successfully!")
     except FileNotFoundError:

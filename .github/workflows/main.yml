@@ -2,7 +2,7 @@ name: Hourly Financial News Scraper
 
 on:
   schedule:
-    - cron: '0 * * * *' # Run at minute 0 past every hour
+    - cron: '0 */2 * * *' # Run at minute 0 past every 2nd hour
   workflow_dispatch: # Allow manual triggering
 
 jobs:
