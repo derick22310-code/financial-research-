@@ -1,10 +1,13 @@
 import json
 import logging
 import os
-from typing import List, Dict
 import requests
+from typing import List, Dict
 import google.generativeai as genai
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+import pytz
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class AIProcessor:
     def __init__(self, config_path: str = 'config.json'):
@@ -12,14 +15,10 @@ class AIProcessor:
             self.config = json.load(f)
         self.keywords = [k.lower() for k in self.config.get('keywords', [])]
         
-        # In a real app, API key should come from environment variables
-        # Assuming the user has set GOOGLE_API_KEY environment variable.
-        # Alternatively we could prompt for it, but for a local script env var is standard.
-        # We will attempt to get it from os.environ, if not present initialization might fail during API call.
         api_key = os.environ.get("GOOGLE_API_KEY")
-        
         self.tg_token = os.environ.get("TG_TOKEN")
         self.tg_chat_id = os.environ.get("TG_CHAT_ID")
+        
         if not self.tg_token or not self.tg_chat_id:
             logging.info("TG_TOKEN or TG_CHAT_ID not set. Telegram notifications are disabled.")
 
@@ -28,11 +27,11 @@ class AIProcessor:
         else:
              genai.configure(api_key=api_key)
              
-        # Use recommended fast model for text summarization
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        # Using Gemini 1.5 Flash as requested (or standard flash mapping)
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
 
     def filter_by_keywords(self, articles: List[Dict]) -> List[Dict]:
-        """Filters articles, keeping only those containing at least one keyword in the title."""
+        """Filters articles by keywords."""
         filtered_articles = []
         for article in articles:
             title_lower = article['title'].lower()
@@ -42,18 +41,18 @@ class AIProcessor:
         logging.info(f"Filtered {len(articles)} articles down to {len(filtered_articles)} based on keywords.")
         return filtered_articles
 
-    def summarize_article(self, article: Dict) -> Dict:
-        """Uses Gemini to summarize the headline/article context and score importance."""
+    def summarize_and_score(self, article: Dict) -> Dict:
+        """Uses Gemini to summarize, translate, and score the article."""
         prompt = f"""
         Analyze the following financial news headline.
         Title: {article['title']}
         Source: {article['source']}
 
         你必須全程使用繁體中文進行摘要，否則程式會出錯。
-        1. Assess its importance to the financial market on a scale of 1 to 10.
-        2. Translate the title into Traditional Chinese (繁體中文).
-        3. Write a brief summary in Traditional Chinese (around 60 words).
-        4. Write a brief summary in English (around 60 words).
+        1. 針對這則新聞對金融市場的重要性進行評分 (1-10分)。
+        2. 將標題翻譯成繁體中文。
+        3. 撰寫約 80 字的繁體中文摘要。
+        4. 提供原本的英文摘要 (Original Summary)。
 
         You MUST respond ONLY with a valid JSON object strictly matching this format:
         {{
@@ -70,20 +69,23 @@ class AIProcessor:
             data = json.loads(text)
             
             article['score'] = data.get('score', 0)
-            article['summary'] = f"<b>【標題】：{data.get('zh_title', article['title'])}</b>\n\n摘要：{data.get('zh_summary', 'N/A')}\n\nOriginal Summary：{data.get('en_summary', 'N/A')}"
             
-            logging.info(f"Successfully summarized: {article['title'][:30]}... (Score: {article['score']})")
+            # Requested format
+            article['summary'] = f"【標題】：{data.get('zh_title', article['title'])}\n\n摘要：{data.get('zh_summary', 'N/A')}\n\nOriginal Summary：{data.get('en_summary', 'N/A')}"
+            
+            logging.info(f"Successfully processed: {article['title'][:30]}... (Score: {article['score']})")
         except Exception as e:
-            logging.error(f"Failed to summarize article '{article['title'][:30]}...': {e}")
+            logging.error(f"Failed to process article '{article['title'][:30]}...': {e}")
             article['score'] = 0
-            article['summary'] = "Summary generation failed."
+            article['summary'] = ""
             
         return article
 
     def send_telegram_message(self, message: str):
         """Sends a message to the configured Telegram chat."""
         if not self.tg_token or not self.tg_chat_id:
-            return
+            logging.error("Telegram credentials missing, cannot send.")
+            return False
             
         url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
         payload = {
@@ -95,79 +97,66 @@ class AIProcessor:
             response = requests.post(url, json=payload, timeout=10)
             if response.status_code != 200:
                 logging.error(f"Failed to send Telegram message: {response.text}")
+                return False
             else:
-                logging.info("Successfully sent message to Telegram.")
+                return True
         except Exception as e:
             logging.error(f"Error sending Telegram message: {e}")
+            return False
 
-    def process(self, articles: List[Dict]) -> List[Dict]:
-        """Filters and summarizes the list of articles."""
-        filtered = self.filter_by_keywords(articles)
-        
-        processed = []
-        for article in filtered:
-            processed_article = self.summarize_article(article)
-            processed.append(processed_article)
-            
-        # Sort by importance score descending and limit to top 5
-        processed.sort(key=lambda x: x.get('score', 0), reverse=True)
-        top_5 = processed[:5]
-            
-        # Group into Telegram message(s)
-        valid_articles = [a for a in top_5 if a.get('summary') and a['summary'] != "Summary generation failed."]
-        if valid_articles:
-            tz_tpe = timezone(timedelta(hours=8))
-            now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
-            
-            header = f"📊 <b>今日金融重點快訊 (台北時間 {now})</b>\n\n"
-            messages = []
-            current_msg = header
-            
-            for a in valid_articles:
-                article_block = f"<i>Source: {a['source']}</i>\n\n{a['summary']}\n\n<a href='{a.get('url', '#')}'>閱讀原文 (Read more)</a>\n\n──────────────\n\n"
-                
-                # Check length limit (Telegram max is 4096 chars)
-                if len(current_msg) + len(article_block) > 4000:
-                    messages.append(current_msg)
-                    current_msg = article_block
-                else:
-                    current_msg += article_block
-                    
-            if current_msg:
-                messages.append(current_msg)
-                
-            for m in messages:
-                self.send_telegram_message(m)
-
-        return processed
+def read_latest_json(data_dir='data'):
+    import glob
+    # Find the latest json file matched by pattern
+    list_of_files = glob.glob(f'{data_dir}/news_*.json')
+    if not list_of_files:
+        return []
+    latest_file = max(list_of_files, key=os.path.getctime)
+    logging.info(f"Reading data from: {latest_file}")
+    with open(latest_file, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 if __name__ == "__main__":
-    import asyncio
-    from scraper import NewsScraper
-    from storage import StorageManager
-
-    async def main():
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        logging.info("Starting Multi-source Financial News Monitoring System from ai_processor...")
+    logging.info("Starting Nuclear Fix AI Processor...")
+    processor = AIProcessor()
+    
+    # 1. Read raw JSON data
+    articles = read_latest_json()
+    if not articles:
+        logging.info("No articles found in data directory.")
+        exit(0)
         
-        scraper = NewsScraper()
-        ai = AIProcessor()
-        storage = StorageManager()
+    logging.info(f"Read {len(articles)} raw articles.")
+    
+    # 2. Filter
+    filtered = processor.filter_by_keywords(articles)
+    
+    # 3. Process (Score and Summarize)
+    logging.info("Calling Gemini API for processing...")
+    processed = []
+    for article in filtered:
+        processed_article = processor.summarize_and_score(article)
+        processed.append(processed_article)
         
-        logging.info("Phase 1: Scraping...")
-        all_articles = await scraper.scrape_all()
-        logging.info(f"Total articles scraped: {len(all_articles)}")
+    # 4. Sort and Top 5
+    processed.sort(key=lambda x: x.get('score', 0), reverse=True)
+    top_5 = processed[:5]
+    
+    valid_articles = [a for a in top_5 if a.get('summary')]
+    
+    # 5. Integrate and Send
+    if valid_articles:
+        taipei_tz = pytz.timezone('Asia/Taipei')
+        now_str = datetime.now(taipei_tz).strftime('%Y-%m-%d %H:%M')
         
-        logging.info("Phase 2: AI Processing & Filtering...")
-        processed_articles = ai.process(all_articles)
-        logging.info(f"Total articles after filtering and summarization: {len(processed_articles)}")
+        final_message = f"📊 <b>今日金融重點快訊 (台北時間: {now_str})</b>\n\n"
         
-        logging.info("Phase 3: Saving data...")
-        if processed_articles:
-             storage.save_results(processed_articles)
-        else:
-             logging.info("No articles matched keywords. Nothing to save.")
-             
-        logging.info("Done.")
-
-    asyncio.run(main())
+        for a in valid_articles:
+            final_message += f"<b>{a['summary']}</b>\n"
+            final_message += f"<i>來源: {a['source']}</i> | <a href='{a.get('url', '#')}'>閱讀原文</a>\n"
+            final_message += "──────────────\n\n"
+            
+        success = processor.send_telegram_message(final_message)
+        if success:
+            logging.info("FINAL_SUCCESS: Message sent to Telegram")
+    else:
+        logging.info("No valid articles to send after processing.")
