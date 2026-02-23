@@ -49,6 +49,7 @@ class AIProcessor:
         Title: {article['title']}
         Source: {article['source']}
 
+        你必須全程使用繁體中文進行摘要，否則程式會出錯。
         1. Assess its importance to the financial market on a scale of 1 to 10.
         2. Translate the title into Traditional Chinese (繁體中文).
         3. Write a brief summary in Traditional Chinese (around 60 words).
@@ -118,7 +119,7 @@ class AIProcessor:
             tz_tpe = timezone(timedelta(hours=8))
             now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
             
-            header = f"📊 <b>今日金融重點快訊 ({now})</b>\n\n"
+            header = f"📊 <b>今日金融重點快訊 (台北時間 {now})</b>\n\n"
             messages = []
             current_msg = header
             
@@ -141,47 +142,32 @@ class AIProcessor:
         return processed
 
 if __name__ == "__main__":
-    # Local test block to send previously saved news to Telegram
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    processor = AIProcessor()
-    
-    try:
-        with open('data/news_20260223.json', 'r', encoding='utf-8') as f:
-            saved_articles = json.load(f)
-            
-        logging.info(f"Loaded {len(saved_articles)} articles from data/news_20260223.json")
+    import asyncio
+    from scraper import NewsScraper
+    from storage import StorageManager
+
+    async def main():
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.info("Starting Multi-source Financial News Monitoring System from ai_processor...")
         
-        # Sort by importance score descending and limit to top 5
-        saved_articles.sort(key=lambda x: x.get('score', 0), reverse=True)
-        top_5 = saved_articles[:5]
+        scraper = NewsScraper()
+        ai = AIProcessor()
+        storage = StorageManager()
         
-        valid_articles = [a for a in top_5 if a.get('summary') and a['summary'] != "Summary generation failed."]
-        if valid_articles:
-            tz_tpe = timezone(timedelta(hours=8))
-            now = datetime.now(tz_tpe).strftime('%Y-%m-%d %H:%M')
-            
-            header = f"📊 <b>今日金融重點快訊 ({now})</b>\n\n"
-            messages = []
-            current_msg = header
-            
-            for a in valid_articles:
-                # If reading old formatted jsons without zh_title, we gracefully just print the title.
-                title_line = "" if "【標題】" in a['summary'] else f"<b>{a['title']}</b>\n"
-                
-                article_block = f"{title_line}<i>Source: {a['source']}</i>\n\n{a['summary']}\n\n<a href='{a.get('url', '#')}'>閱讀原文 (Read more)</a>\n\n──────────────\n\n"
-                
-                if len(current_msg) + len(article_block) > 4000:
-                    messages.append(current_msg)
-                    current_msg = article_block
-                else:
-                    current_msg += article_block
-                    
-            if current_msg:
-                messages.append(current_msg)
-                
-            for m in messages:
-                processor.send_telegram_message(m)
-                
-        logging.info("Telegram message sent successfully!")
-    except FileNotFoundError:
-        logging.error("File data/news_20260223.json not found.")
+        logging.info("Phase 1: Scraping...")
+        all_articles = await scraper.scrape_all()
+        logging.info(f"Total articles scraped: {len(all_articles)}")
+        
+        logging.info("Phase 2: AI Processing & Filtering...")
+        processed_articles = ai.process(all_articles)
+        logging.info(f"Total articles after filtering and summarization: {len(processed_articles)}")
+        
+        logging.info("Phase 3: Saving data...")
+        if processed_articles:
+             storage.save_results(processed_articles)
+        else:
+             logging.info("No articles matched keywords. Nothing to save.")
+             
+        logging.info("Done.")
+
+    asyncio.run(main())
