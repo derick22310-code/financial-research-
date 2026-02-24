@@ -26,7 +26,7 @@ class AIProcessor:
         else:
              genai.configure(api_key=api_key)
              
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
 
     def filter_by_keywords(self, articles: List[Dict]) -> List[Dict]:
         filtered = []
