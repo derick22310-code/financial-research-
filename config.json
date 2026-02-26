@@ -74,6 +74,27 @@
       "article_selector": "li[data-test='article-item']",
       "headline_selector": "a[data-test='article-title-link']",
       "link_selector": "a[data-test='article-title-link']"
+    },
+    {
+      "name": "經濟日報 (UDN Money)",
+      "url": "https://money.udn.com/money/cate/5588",
+      "article_selector": ".story-list__news",
+      "headline_selector": ".story-list__headline a",
+      "link_selector": ".story-list__headline a"
+    },
+    {
+      "name": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/topic/stock-market-news/",
+      "article_selector": "a.titles",
+      "headline_selector": "h3",
+      "link_selector": "self"
+    },
+    {
+      "name": "華爾街見聞 (Wallstreetcn)",
+      "url": "https://wallstreetcn.com/news/global",
+      "article_selector": ".article-item",
+      "headline_selector": ".article-link.title",
+      "link_selector": "a.article-link"
     }
   ]
 }
