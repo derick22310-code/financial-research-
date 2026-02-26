@@ -22,7 +22,15 @@ class AIProcessor:
         self.tg_chat_id = os.environ.get("TG_CHAT_ID")
 
         if not api_key:
-            logging.warning("OPENROUTER_API_KEY is missing. API calls will fail.")
+            logging.error("CRITICAL: OPENROUTER_API_KEY is NOT set in environment. All API calls will fail.")
+        else:
+            masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
+            logging.info(f"OPENROUTER_API_KEY loaded successfully (masked: {masked})")
+
+        if not self.tg_token:
+            logging.error("CRITICAL: TG_TOKEN is NOT set in environment.")
+        if not self.tg_chat_id:
+            logging.error("CRITICAL: TG_CHAT_ID is NOT set in environment.")
 
         self.client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -61,6 +69,7 @@ class AIProcessor:
 }}"""
 
         try:
+            logging.info(f"Sending request to OpenRouter for: {article['title'][:50]}...")
             response = self.client.chat.completions.create(
                 model="deepseek/deepseek-r1:free",
                 messages=[
@@ -70,20 +79,30 @@ class AIProcessor:
             )
             text = response.choices[0].message.content
             if text:
+                # DeepSeek-R1 may include <think>...</think> reasoning blocks, strip them
+                import re
+                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
                 text = text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(text)
                 article['score'] = data.get('score', 0)
                 article['zh_title'] = data.get('zh_title', article['title'])
                 article['zh_summary'] = data.get('zh_summary', 'N/A')
                 article['en_summary'] = data.get('en_summary', 'N/A')
-                logging.info(f"Processed: {article['zh_title']} (Score: {article['score']})")
+                logging.info(f"OK: {article['zh_title']} (Score: {article['score']})")
             else:
                 raise ValueError("Empty response from API")
-        except Exception as e:
-            logging.error(f"Error processing article '{article['title'][:40]}': {e}")
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON parse error for '{article['title'][:40]}': {e}. Raw text: {text[:200] if text else 'None'}")
             article['score'] = 0
             article['zh_title'] = article.get('title', '')
-            article['zh_summary'] = "摘要生成失敗"
+            article['zh_summary'] = "摘要生成失敗 (JSON 解析錯誤)"
+            article['en_summary'] = "N/A"
+        except Exception as e:
+            error_type = type(e).__name__
+            logging.error(f"API ERROR [{error_type}] for '{article['title'][:40]}': {e}")
+            article['score'] = 0
+            article['zh_title'] = article.get('title', '')
+            article['zh_summary'] = f"摘要生成失敗 ({error_type})"
             article['en_summary'] = "N/A"
 
         # Rate limit: free tier requires delay between requests
@@ -117,9 +136,27 @@ if __name__ == "__main__":
 
     async def run_all():
         logging.info("=== AI Processor (OpenRouter Edition) Starting ===")
+        logging.info(f"Environment check: OPENROUTER_API_KEY={'SET' if os.environ.get('OPENROUTER_API_KEY') else 'MISSING'}")
+        logging.info(f"Environment check: TG_TOKEN={'SET' if os.environ.get('TG_TOKEN') else 'MISSING'}")
+        logging.info(f"Environment check: TG_CHAT_ID={'SET' if os.environ.get('TG_CHAT_ID') else 'MISSING'}")
+
         scraper = NewsScraper()
         ai = AIProcessor()
         storage = StorageManager()
+
+        # Pre-flight API test
+        try:
+            logging.info("Running pre-flight API test...")
+            test_resp = ai.client.chat.completions.create(
+                model="deepseek/deepseek-r1:free",
+                messages=[{"role": "user", "content": "Say OK"}],
+                max_tokens=5
+            )
+            logging.info(f"Pre-flight API test PASSED. Response: {test_resp.choices[0].message.content}")
+        except Exception as e:
+            logging.error(f"Pre-flight API test FAILED: {type(e).__name__}: {e}")
+            logging.error("Aborting: OpenRouter API is not reachable. Check your OPENROUTER_API_KEY secret.")
+            return
 
         # Phase 1: Scrape
         raw_articles = await scraper.scrape_all()
