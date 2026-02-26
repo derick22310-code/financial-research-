@@ -71,17 +71,18 @@ class AIProcessor:
         try:
             logging.info(f"Sending request to OpenRouter for: {article['title'][:50]}...")
             response = self.client.chat.completions.create(
-                model="deepseek/deepseek-r1:free",
+                model="google/gemini-2.0-flash-lite-preview-02-05:free",
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3
+                temperature=0.3,
+                extra_headers={
+                    "HTTP-Referer": "https://github.com/",
+                    "X-Title": "Financial Researcher"
+                }
             )
             text = response.choices[0].message.content
             if text:
-                # DeepSeek-R1 may include <think>...</think> reasoning blocks, strip them
-                import re
-                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
                 text = text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(text)
                 article['score'] = data.get('score', 0)
@@ -144,20 +145,6 @@ if __name__ == "__main__":
         ai = AIProcessor()
         storage = StorageManager()
 
-        # Pre-flight API test
-        try:
-            logging.info("Running pre-flight API test...")
-            test_resp = ai.client.chat.completions.create(
-                model="deepseek/deepseek-r1:free",
-                messages=[{"role": "user", "content": "Say OK"}],
-                max_tokens=5
-            )
-            logging.info(f"Pre-flight API test PASSED. Response: {test_resp.choices[0].message.content}")
-        except Exception as e:
-            logging.error(f"Pre-flight API test FAILED: {type(e).__name__}: {e}")
-            logging.error("Aborting: OpenRouter API is not reachable. Check your OPENROUTER_API_KEY secret.")
-            return
-
         # Phase 1: Scrape
         raw_articles = await scraper.scrape_all()
         logging.info(f"Scraped {len(raw_articles)} raw articles.")
@@ -166,7 +153,7 @@ if __name__ == "__main__":
         filtered = ai.filter_by_keywords(raw_articles)
 
         # Phase 3: Process each article with AI (score + translate + summarize)
-        logging.info("Calling OpenRouter API (DeepSeek-R1) for processing...")
+        logging.info("Calling OpenRouter API (Gemini Flash Lite) for processing...")
         processed_list = []
         for a in filtered:
             processed_list.append(ai.process_article(a))
