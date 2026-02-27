@@ -78,7 +78,7 @@ class AIProcessor:
                 temperature=0.3,
                 extra_headers={
                     "HTTP-Referer": "https://github.com/",
-                    "X-Title": "Financial Researcher"
+                    "X-Title": "Finance Bot"
                 }
             )
             text = response.choices[0].message.content
