@@ -4,7 +4,7 @@ import os
 import time
 import requests
 from typing import List, Dict
-from openai import OpenAI
+import google.generativeai as genai
 from datetime import datetime
 import pytz
 import asyncio
@@ -17,25 +17,18 @@ class AIProcessor:
             self.config = json.load(f)
         self.keywords = [k.lower() for k in self.config.get('keywords', [])]
 
-        api_key = os.environ.get("OPENROUTER_API_KEY")
+        api_key = os.environ.get("GOOGLE_API_KEY")
         self.tg_token = os.environ.get("TG_TOKEN")
         self.tg_chat_id = os.environ.get("TG_CHAT_ID")
 
         if not api_key:
-            logging.error("CRITICAL: OPENROUTER_API_KEY is NOT set in environment. All API calls will fail.")
+            logging.error("CRITICAL: GOOGLE_API_KEY is NOT set.")
         else:
+            genai.configure(api_key=api_key)
             masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
-            logging.info(f"OPENROUTER_API_KEY loaded successfully (masked: {masked})")
+            logging.info(f"GOOGLE_API_KEY loaded (masked: {masked})")
 
-        if not self.tg_token:
-            logging.error("CRITICAL: TG_TOKEN is NOT set in environment.")
-        if not self.tg_chat_id:
-            logging.error("CRITICAL: TG_CHAT_ID is NOT set in environment.")
-
-        self.client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key or "missing"
-        )
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
 
     def filter_by_keywords(self, articles: List[Dict]) -> List[Dict]:
         filtered = []
@@ -45,13 +38,6 @@ class AIProcessor:
                 filtered.append(article)
         logging.info(f"Filtered down to {len(filtered)} articles from {len(articles)}.")
         return filtered
-
-    # Ordered fallback model list (most stable first)
-    MODELS = [
-        "google/gemini-2.0-flash-exp:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "google/gemma-3-27b-it:free",
-    ]
 
     def process_article(self, article: Dict) -> Dict:
         prompt = f"""你是一位專業的金融分析師。請分析以下新聞標題，並以 JSON 格式回覆。
@@ -75,78 +61,46 @@ class AIProcessor:
     "en_summary": "English summary content"
 }}"""
 
-        last_error = None
+        try:
+            logging.info(f"Calling Gemini for: {article['title'][:50]}...")
+            response = self.model.generate_content(prompt)
+            text = response.text
+            if not text:
+                raise ValueError("Empty response from Gemini")
 
-        for model_id in self.MODELS:
-            try:
-                logging.info(f"Trying model [{model_id}] for: {article['title'][:50]}...")
-                response = self.client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.3,
-                    extra_headers={
-                        "HTTP-Referer": "https://github.com/",
-                        "X-Title": "Finance Research Bot"
-                    }
-                )
-                text = response.choices[0].message.content
-                if not text:
-                    raise ValueError("Empty response from API")
+            text = text.replace("```json", "").replace("```", "").strip()
+            data = json.loads(text)
+            article['score'] = data.get('score', 0)
+            article['zh_title'] = data.get('zh_title', article['title'])
+            article['zh_summary'] = data.get('zh_summary', 'N/A')
+            article['en_summary'] = data.get('en_summary', 'N/A')
+            logging.info(f"OK: {article['zh_title']} (Score: {article['score']})")
 
-                text = text.replace("```json", "").replace("```", "").strip()
-                data = json.loads(text)
-                article['score'] = data.get('score', 0)
-                article['zh_title'] = data.get('zh_title', article['title'])
-                article['zh_summary'] = data.get('zh_summary', 'N/A')
-                article['en_summary'] = data.get('en_summary', 'N/A')
-                logging.info(f"OK via [{model_id}]: {article['zh_title']} (Score: {article['score']})")
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON parse error: {e}")
+            article['score'] = 0
+            article['zh_title'] = article.get('title', '')
+            article['zh_summary'] = "摘要生成失敗 (JSON 解析錯誤)"
+            article['en_summary'] = "N/A"
+        except Exception as e:
+            error_type = type(e).__name__
+            logging.error(f"Gemini API ERROR [{error_type}] for '{article['title'][:40]}': {e}")
+            article['score'] = 0
+            article['zh_title'] = article.get('title', '')
+            article['zh_summary'] = f"摘要生成失敗 ({error_type}: {str(e)[:80]})"
+            article['en_summary'] = "N/A"
 
-                time.sleep(2)
-                return article
-
-            except json.JSONDecodeError as e:
-                logging.error(f"JSON parse error with [{model_id}]: {e}")
-                last_error = f"JSON 解析錯誤 ({model_id})"
-                # Don't retry on JSON errors — the model responded, just badly
-                break
-            except Exception as e:
-                error_type = type(e).__name__
-                error_msg = str(e)
-                error_code = getattr(e, 'status_code', getattr(e, 'code', ''))
-                logging.warning(f"Model [{model_id}] failed: [{error_type}] {error_code} - {error_msg}")
-                last_error = f"{error_type}: {error_code} - {error_msg[:100]}"
-
-                # Only retry on 400/404 (model issues); other errors → stop
-                if "400" in error_msg or "404" in error_msg or "BadRequest" in error_type or "NotFound" in error_type:
-                    logging.info(f"Retryable error, trying next model...")
-                    time.sleep(1)
-                    continue
-                else:
-                    break
-
-        # All models failed
-        logging.error(f"ALL MODELS FAILED for '{article['title'][:40]}'. Last error: {last_error}")
-        article['score'] = 0
-        article['zh_title'] = article.get('title', '')
-        article['zh_summary'] = f"所有模型皆失敗: {last_error}"
-        article['en_summary'] = "N/A"
-
-        time.sleep(2)
+        # Rate limit: avoid 429 errors
+        time.sleep(5)
         return article
 
 
-def send_telegram_bulk(token: str, chat_id: str, text: str):
+def send_telegram_bulk(token, chat_id, text):
     if not token or not chat_id:
         logging.error("Missing Telegram credentials.")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.status_code == 200:
@@ -162,10 +116,10 @@ if __name__ == "__main__":
     from storage import StorageManager
 
     async def run_all():
-        logging.info("=== AI Processor (OpenRouter Edition) Starting ===")
-        logging.info(f"Environment check: OPENROUTER_API_KEY={'SET' if os.environ.get('OPENROUTER_API_KEY') else 'MISSING'}")
-        logging.info(f"Environment check: TG_TOKEN={'SET' if os.environ.get('TG_TOKEN') else 'MISSING'}")
-        logging.info(f"Environment check: TG_CHAT_ID={'SET' if os.environ.get('TG_CHAT_ID') else 'MISSING'}")
+        logging.info("=== AI Processor (Gemini Edition) Starting ===")
+        logging.info(f"Env: GOOGLE_API_KEY={'SET' if os.environ.get('GOOGLE_API_KEY') else 'MISSING'}")
+        logging.info(f"Env: TG_TOKEN={'SET' if os.environ.get('TG_TOKEN') else 'MISSING'}")
+        logging.info(f"Env: TG_CHAT_ID={'SET' if os.environ.get('TG_CHAT_ID') else 'MISSING'}")
 
         scraper = NewsScraper()
         ai = AIProcessor()
@@ -175,24 +129,25 @@ if __name__ == "__main__":
         raw_articles = await scraper.scrape_all()
         logging.info(f"Scraped {len(raw_articles)} raw articles.")
 
-        # Phase 2: Filter by keywords
+        # Phase 2: Filter
         filtered = ai.filter_by_keywords(raw_articles)
+        logging.info(f"Filtered down to {len(filtered)} articles.")
 
-        # Phase 3: Process each article with AI (score + translate + summarize)
-        logging.info("Calling OpenRouter API (Gemini Flash Lite) for processing...")
+        # Phase 3: Process with Gemini (score + translate + summarize)
+        logging.info("Calling Gemini API for processing...")
         processed_list = []
         for a in filtered:
             processed_list.append(ai.process_article(a))
 
-        # Phase 4: Sort by score descending, keep top 5
+        # Phase 4: Sort by score, keep top 5
         processed_list.sort(key=lambda x: x.get('score', 0), reverse=True)
         top_5 = processed_list[:5]
-        logging.info(f"Top {len(top_5)} articles selected for Telegram notification.")
+        logging.info(f"Top {len(top_5)} articles selected.")
 
-        # Phase 5: Save all results
+        # Phase 5: Save
         storage.save_results(processed_list)
 
-        # Phase 6: Build and send integrated Chinese Telegram message
+        # Phase 6: Build and send Telegram message
         if top_5:
             taipei_tz = pytz.timezone('Asia/Taipei')
             now_str = datetime.now(taipei_tz).strftime('%Y-%m-%d %H:%M')
@@ -202,8 +157,8 @@ if __name__ == "__main__":
                 zh_t = item.get('zh_title') or item.get('title', '')
                 zh_s = item.get('zh_summary', 'N/A')
                 en_s = item.get('en_summary', 'N/A')
-                src  = item.get('source', '')
-                url  = item.get('url', '#')
+                src = item.get('source', '')
+                url = item.get('url', '#')
 
                 msg += f"<b>【標題】：{zh_t}</b>\n"
                 msg += f"摘要：{zh_s}\n\n"
@@ -213,6 +168,6 @@ if __name__ == "__main__":
 
             send_telegram_bulk(ai.tg_token, ai.tg_chat_id, msg)
         else:
-            logging.info("No articles to send after processing.")
+            logging.info("No articles to send.")
 
     asyncio.run(run_all())

@@ -1,9 +1,10 @@
-name: Hourly Financial News Scraper
+name: Financial News Scraper
 
 on:
   schedule:
-    - cron: '0 */2 * * *' # Run at minute 0 past every 2nd hour
-  workflow_dispatch: # Allow manual triggering
+    - cron: '30 6 * * *'
+    - cron: '0 12,18,23 * * *'
+  workflow_dispatch:
 
 jobs:
   scrape-and-notify:
@@ -26,7 +27,7 @@ jobs:
 
       - name: Run Scraper and AI Processor
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
