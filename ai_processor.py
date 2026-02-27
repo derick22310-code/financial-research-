@@ -4,7 +4,7 @@ import os
 import time
 import requests
 from typing import List, Dict
-import google.generativeai as genai
+from google import genai
 from datetime import datetime
 import pytz
 import asyncio
@@ -24,11 +24,10 @@ class AIProcessor:
         if not api_key:
             logging.error("CRITICAL: GOOGLE_API_KEY is NOT set.")
         else:
-            genai.configure(api_key=api_key)
             masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
             logging.info(f"GOOGLE_API_KEY loaded (masked: {masked})")
 
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.client = genai.Client(api_key=api_key)
 
     def filter_by_keywords(self, articles: List[Dict]) -> List[Dict]:
         filtered = []
@@ -63,7 +62,10 @@ class AIProcessor:
 
         try:
             logging.info(f"Calling Gemini for: {article['title'][:50]}...")
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=prompt
+            )
             text = response.text
             if not text:
                 raise ValueError("Empty response from Gemini")
@@ -116,7 +118,7 @@ if __name__ == "__main__":
     from storage import StorageManager
 
     async def run_all():
-        logging.info("=== AI Processor (Gemini Edition) Starting ===")
+        logging.info("=== AI Processor (google-genai SDK) Starting ===")
         logging.info(f"Env: GOOGLE_API_KEY={'SET' if os.environ.get('GOOGLE_API_KEY') else 'MISSING'}")
         logging.info(f"Env: TG_TOKEN={'SET' if os.environ.get('TG_TOKEN') else 'MISSING'}")
         logging.info(f"Env: TG_CHAT_ID={'SET' if os.environ.get('TG_CHAT_ID') else 'MISSING'}")
@@ -131,7 +133,6 @@ if __name__ == "__main__":
 
         # Phase 2: Filter
         filtered = ai.filter_by_keywords(raw_articles)
-        logging.info(f"Filtered down to {len(filtered)} articles.")
 
         # Phase 3: Process with Gemini (score + translate + summarize)
         logging.info("Calling Gemini API for processing...")
