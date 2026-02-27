@@ -46,6 +46,13 @@ class AIProcessor:
         logging.info(f"Filtered down to {len(filtered)} articles from {len(articles)}.")
         return filtered
 
+    # Ordered fallback model list (most stable first)
+    MODELS = [
+        "google/gemini-2.0-flash-exp:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemma-3-27b-it:free",
+    ]
+
     def process_article(self, article: Dict) -> Dict:
         prompt = f"""你是一位專業的金融分析師。請分析以下新聞標題，並以 JSON 格式回覆。
 
@@ -68,49 +75,64 @@ class AIProcessor:
     "en_summary": "English summary content"
 }}"""
 
-        try:
-            logging.info(f"Sending request to OpenRouter for: {article['title'][:50]}...")
-            response = self.client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                extra_headers={
-                    "HTTP-Referer": "https://github.com/",
-                    "X-Title": "FinanceBot"
-                }
-            )
-            text = response.choices[0].message.content
-            if text:
+        last_error = None
+
+        for model_id in self.MODELS:
+            try:
+                logging.info(f"Trying model [{model_id}] for: {article['title'][:50]}...")
+                response = self.client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    extra_headers={
+                        "HTTP-Referer": "https://github.com/",
+                        "X-Title": "Finance Research Bot"
+                    }
+                )
+                text = response.choices[0].message.content
+                if not text:
+                    raise ValueError("Empty response from API")
+
                 text = text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(text)
                 article['score'] = data.get('score', 0)
                 article['zh_title'] = data.get('zh_title', article['title'])
                 article['zh_summary'] = data.get('zh_summary', 'N/A')
                 article['en_summary'] = data.get('en_summary', 'N/A')
-                logging.info(f"OK: {article['zh_title']} (Score: {article['score']})")
-            else:
-                raise ValueError("Empty response from API")
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON parse error for '{article['title'][:40]}': {e}. Raw text: {text[:200] if text else 'None'}")
-            article['score'] = 0
-            article['zh_title'] = article.get('title', '')
-            article['zh_summary'] = "摘要生成失敗 (JSON 解析錯誤)"
-            article['en_summary'] = "N/A"
-        except Exception as e:
-            error_type = type(e).__name__
-            if "BadRequest" in error_type or "400" in str(e):
-                logging.error(f"BAD REQUEST for '{article['title'][:40]}': {e}")
-                article['zh_summary'] = "模型 ID 無效，請檢查 OpenRouter 模型列表"
-            else:
-                logging.error(f"API ERROR [{error_type}] for '{article['title'][:40]}': {e}")
-                article['zh_summary'] = f"摘要生成失敗 ({error_type})"
-            article['score'] = 0
-            article['zh_title'] = article.get('title', '')
-            article['en_summary'] = "N/A"
+                logging.info(f"OK via [{model_id}]: {article['zh_title']} (Score: {article['score']})")
 
-        # Rate limit: free tier requires delay between requests
+                time.sleep(2)
+                return article
+
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON parse error with [{model_id}]: {e}")
+                last_error = f"JSON 解析錯誤 ({model_id})"
+                # Don't retry on JSON errors — the model responded, just badly
+                break
+            except Exception as e:
+                error_type = type(e).__name__
+                error_msg = str(e)
+                error_code = getattr(e, 'status_code', getattr(e, 'code', ''))
+                logging.warning(f"Model [{model_id}] failed: [{error_type}] {error_code} - {error_msg}")
+                last_error = f"{error_type}: {error_code} - {error_msg[:100]}"
+
+                # Only retry on 400/404 (model issues); other errors → stop
+                if "400" in error_msg or "404" in error_msg or "BadRequest" in error_type or "NotFound" in error_type:
+                    logging.info(f"Retryable error, trying next model...")
+                    time.sleep(1)
+                    continue
+                else:
+                    break
+
+        # All models failed
+        logging.error(f"ALL MODELS FAILED for '{article['title'][:40]}'. Last error: {last_error}")
+        article['score'] = 0
+        article['zh_title'] = article.get('title', '')
+        article['zh_summary'] = f"所有模型皆失敗: {last_error}"
+        article['en_summary'] = "N/A"
+
         time.sleep(2)
         return article
 
