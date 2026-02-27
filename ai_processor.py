@@ -71,14 +71,14 @@ class AIProcessor:
         try:
             logging.info(f"Sending request to OpenRouter for: {article['title'][:50]}...")
             response = self.client.chat.completions.create(
-                model="google/gemini-2.0-flash-lite-preview-02-05:free",
+                model="google/gemini-2.0-flash-exp:free",
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
                 extra_headers={
                     "HTTP-Referer": "https://github.com/",
-                    "X-Title": "Finance Bot"
+                    "X-Title": "FinanceBot"
                 }
             )
             text = response.choices[0].message.content
@@ -100,10 +100,14 @@ class AIProcessor:
             article['en_summary'] = "N/A"
         except Exception as e:
             error_type = type(e).__name__
-            logging.error(f"API ERROR [{error_type}] for '{article['title'][:40]}': {e}")
+            if "BadRequest" in error_type or "400" in str(e):
+                logging.error(f"BAD REQUEST for '{article['title'][:40]}': {e}")
+                article['zh_summary'] = "模型 ID 無效，請檢查 OpenRouter 模型列表"
+            else:
+                logging.error(f"API ERROR [{error_type}] for '{article['title'][:40]}': {e}")
+                article['zh_summary'] = f"摘要生成失敗 ({error_type})"
             article['score'] = 0
             article['zh_title'] = article.get('title', '')
-            article['zh_summary'] = f"摘要生成失敗 ({error_type})"
             article['en_summary'] = "N/A"
 
         # Rate limit: free tier requires delay between requests
