@@ -2,8 +2,10 @@ name: Financial News Scraper
 
 on:
   schedule:
-    - cron: '30 6 * * *'
-    - cron: '0 12,18,23 * * *'
+    - cron: '30 22 * * *'
+    - cron: '0 4 * * *'
+    - cron: '0 10 * * *'
+    - cron: '30 15 * * *'
   workflow_dispatch:
 
 jobs:

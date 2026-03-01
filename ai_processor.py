@@ -12,6 +12,12 @@ import asyncio
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class AIProcessor:
+    # ── 配額管理常數 ──
+    PRIMARY_MODEL = "gemini-2.5-flash"          # 主模型（性能好，250 請求/天）
+    BACKUP_MODEL = "gemini-2.5-flash-lite"      # 備用模型（額度高，1000 請求/天）
+    MAX_ARTICLES_PER_RUN = 50                    # 單次最多處理篇數
+    QUOTA_PER_RUN = 62                           # 單次配額上限（250 / 4 時段 ≈ 62）
+
     def __init__(self, config_path: str = 'config.json'):
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
@@ -29,6 +35,17 @@ class AIProcessor:
 
         self.client = genai.Client(api_key=api_key)
 
+        # 運行時計數器
+        self.api_call_count = 0
+        self.current_model = self.PRIMARY_MODEL
+
+        # 印出配置資訊
+        logging.info("📋 配置資訊：")
+        logging.info(f"   主模型: {self.PRIMARY_MODEL} (250 請求/天)")
+        logging.info(f"   備用模型: {self.BACKUP_MODEL} (1000 請求/天)")
+        logging.info(f"   單次處理上限: {self.MAX_ARTICLES_PER_RUN} 篇")
+        logging.info(f"   每次執行配額: {self.QUOTA_PER_RUN} 請求")
+
     def filter_by_keywords(self, articles: List[Dict]) -> List[Dict]:
         filtered = []
         for article in articles:
@@ -38,7 +55,14 @@ class AIProcessor:
         logging.info(f"Filtered down to {len(filtered)} articles from {len(articles)}.")
         return filtered
 
-    def process_article(self, article: Dict) -> Dict:
+    def _switch_to_backup(self, reason: str):
+        """切換到備用模型"""
+        if self.current_model != self.BACKUP_MODEL:
+            logging.warning(f"⚠️ 切換到備用模型！原因: {reason}")
+            logging.warning(f"   {self.current_model} → {self.BACKUP_MODEL}")
+            self.current_model = self.BACKUP_MODEL
+
+    def process_article(self, article: Dict, index: int) -> Dict:
         prompt = f"""你是一位專業的金融分析師。請分析以下新聞標題，並以 JSON 格式回覆。
 
 新聞標題 (Title): {article['title']}
@@ -60,39 +84,59 @@ class AIProcessor:
     "en_summary": "English summary content"
 }}"""
 
-        try:
-            logging.info(f"Calling Gemini for: {article['title'][:50]}...")
-            response = self.client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=prompt
-            )
-            text = response.text
-            if not text:
-                raise ValueError("Empty response from Gemini")
+        # 情況 A：預防性切換 — 當單次使用超過配額時
+        if self.api_call_count >= self.QUOTA_PER_RUN:
+            self._switch_to_backup(f"已達單次配額上限 ({self.QUOTA_PER_RUN} 請求)")
 
-            text = text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(text)
-            article['score'] = data.get('score', 0)
-            article['zh_title'] = data.get('zh_title', article['title'])
-            article['zh_summary'] = data.get('zh_summary', 'N/A')
-            article['en_summary'] = data.get('en_summary', 'N/A')
-            logging.info(f"OK: {article['zh_title']} (Score: {article['score']})")
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                logging.info(f"Calling Gemini ({self.current_model}) [{index}]: {article['title'][:50]}...")
+                response = self.client.models.generate_content(
+                    model=self.current_model,
+                    contents=prompt
+                )
+                self.api_call_count += 1
 
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON parse error: {e}")
-            article['score'] = 0
-            article['zh_title'] = article.get('title', '')
-            article['zh_summary'] = "摘要生成失敗 (JSON 解析錯誤)"
-            article['en_summary'] = "N/A"
-        except Exception as e:
-            error_type = type(e).__name__
-            logging.error(f"Gemini API ERROR [{error_type}] for '{article['title'][:40]}': {e}")
-            article['score'] = 0
-            article['zh_title'] = article.get('title', '')
-            article['zh_summary'] = f"摘要生成失敗 ({error_type}: {str(e)[:80]})"
-            article['en_summary'] = "N/A"
+                text = response.text
+                if not text:
+                    raise ValueError("Empty response from Gemini")
 
-        # Rate limit: avoid 429 errors
+                text = text.replace("```json", "").replace("```", "").strip()
+                data = json.loads(text)
+                article['score'] = data.get('score', 0)
+                article['zh_title'] = data.get('zh_title', article['title'])
+                article['zh_summary'] = data.get('zh_summary', 'N/A')
+                article['en_summary'] = data.get('en_summary', 'N/A')
+                logging.info(f"✅ OK [{index}]: {article['zh_title']} (Score: {article['score']})")
+
+                time.sleep(5)
+                return article
+
+            except Exception as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+
+                # 情況 B：緊急切換 — 遇到 429 錯誤時
+                if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                    logging.warning(f"🚨 429 速率限制！模型: {self.current_model}")
+                    if self.current_model == self.PRIMARY_MODEL:
+                        self._switch_to_backup("429 速率限制觸發")
+                        time.sleep(3)
+                        continue  # 用備用模型重試
+                    else:
+                        logging.error(f"備用模型也被限速，等待 30 秒後重試...")
+                        time.sleep(30)
+                        continue
+                else:
+                    logging.error(f"❌ API ERROR [{error_type}] [{index}]: {e}")
+                    break
+
+        # 所有嘗試都失敗
+        article['score'] = 0
+        article['zh_title'] = article.get('title', '')
+        article['zh_summary'] = f"摘要生成失敗 ({error_type}: {str(e)[:80]})"
+        article['en_summary'] = "N/A"
         time.sleep(5)
         return article
 
@@ -118,7 +162,7 @@ if __name__ == "__main__":
     from storage import StorageManager
 
     async def run_all():
-        logging.info("=== AI Processor (google-genai SDK) Starting ===")
+        logging.info("=== AI Processor (Smart Quota Edition) Starting ===")
         logging.info(f"Env: GOOGLE_API_KEY={'SET' if os.environ.get('GOOGLE_API_KEY') else 'MISSING'}")
         logging.info(f"Env: TG_TOKEN={'SET' if os.environ.get('TG_TOKEN') else 'MISSING'}")
         logging.info(f"Env: TG_CHAT_ID={'SET' if os.environ.get('TG_CHAT_ID') else 'MISSING'}")
@@ -134,21 +178,32 @@ if __name__ == "__main__":
         # Phase 2: Filter
         filtered = ai.filter_by_keywords(raw_articles)
 
-        # Phase 3: Process with Gemini (score + translate + summarize)
+        # Phase 3: Cap at MAX_ARTICLES_PER_RUN
+        if len(filtered) > ai.MAX_ARTICLES_PER_RUN:
+            logging.info(f"⚠️ 文章數 {len(filtered)} 超過上限，僅處理前 {ai.MAX_ARTICLES_PER_RUN} 篇")
+            filtered = filtered[:ai.MAX_ARTICLES_PER_RUN]
+
+        # API 使用預估
+        estimated_daily = len(filtered) * 4  # 4 time slots per day
+        logging.info(f"📊 API 使用預估：本次 {len(filtered)} 請求 | 今日預估 {estimated_daily}/250 請求")
+
+        # Phase 4: Process with Gemini (score + translate + summarize)
         logging.info("Calling Gemini API for processing...")
         processed_list = []
-        for a in filtered:
-            processed_list.append(ai.process_article(a))
+        for idx, a in enumerate(filtered, 1):
+            processed_list.append(ai.process_article(a, idx))
 
-        # Phase 4: Sort by score, keep top 5
+        # Phase 5: Sort by score, keep top 5
         processed_list.sort(key=lambda x: x.get('score', 0), reverse=True)
         top_5 = processed_list[:5]
         logging.info(f"Top {len(top_5)} articles selected.")
 
-        # Phase 5: Save
+        # Phase 6: Save
         storage.save_results(processed_list)
 
-        # Phase 6: Build and send Telegram message
+        logging.info(f"✅ 處理完成！本次共使用 {ai.api_call_count} 次 API 請求")
+
+        # Phase 7: Build and send Telegram message
         if top_5:
             taipei_tz = pytz.timezone('Asia/Taipei')
             now_str = datetime.now(taipei_tz).strftime('%Y-%m-%d %H:%M')
